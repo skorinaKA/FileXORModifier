@@ -19,7 +19,6 @@
 #include <QSpinBox>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
-#include <QCloseEvent>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -29,11 +28,13 @@ MainWindow::MainWindow(QWidget *parent)
     m_processor = new FileProcessor();
     m_processor->moveToThread(&m_workerThread);
 
+    // Кнопки управления
     connect(m_startBtn, &QPushButton::clicked, this, &MainWindow::onStart);
     connect(m_pauseBtn, &QPushButton::clicked, this, &MainWindow::onPause);
     connect(m_resumeBtn, &QPushButton::clicked, this, &MainWindow::onResume);
-    connect(m_stopBtn, &QPushButton::clicked, this, &MainWindow::onStop);
+    connect(m_searchBtn, &QPushButton::clicked, this, &MainWindow::onSearch);
 
+    // Сигналы от обработчика
     connect(m_processor, &FileProcessor::fileProgress,
             this, &MainWindow::onFileProgress);
     connect(m_processor, &FileProcessor::fileCompleted,
@@ -47,6 +48,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_workerThread.start();
 
+    // Таймер опроса (если включён)
     connect(&m_pollTimer, &QTimer::timeout, this, &MainWindow::onTimerTick);
 }
 
@@ -110,7 +112,6 @@ void MainWindow::setupUi()
     m_hexValueEdit = new QLineEdit();
     m_hexValueEdit->setMaxLength(16);
     m_hexValueEdit->setPlaceholderText("16 шестнадцатеричных цифр");
-    // Валидатор: ровно 16 символов [0-9A-Fa-f]
     QRegularExpression hexRegex("^[0-9A-Fa-f]{16}$");
     m_hexValueEdit->setValidator(new QRegularExpressionValidator(hexRegex, this));
     form->addRow("8-байт XOR (hex):", m_hexValueEdit);
@@ -122,14 +123,13 @@ void MainWindow::setupUi()
     m_startBtn = new QPushButton("Старт");
     m_pauseBtn = new QPushButton("Пауза");
     m_resumeBtn = new QPushButton("Продолжить");
-    m_stopBtn = new QPushButton("Стоп");
+    m_searchBtn = new QPushButton("Поиск");   // кнопка поиска
     m_pauseBtn->setEnabled(false);
     m_resumeBtn->setEnabled(false);
-    m_stopBtn->setEnabled(false);
     btnLayout->addWidget(m_startBtn);
     btnLayout->addWidget(m_pauseBtn);
     btnLayout->addWidget(m_resumeBtn);
-    btnLayout->addWidget(m_stopBtn);
+    btnLayout->addWidget(m_searchBtn);
     btnLayout->addStretch();
     mainLayout->addLayout(btnLayout);
 
@@ -162,6 +162,20 @@ void MainWindow::onBrowseOutputPath()
     if (!dir.isEmpty()) m_outputPathEdit->setText(dir);
 }
 
+void MainWindow::onSearch()
+{
+    // Очищаем таблицу и список файлов
+    m_filesTable->setRowCount(0);
+    m_pendingFiles.clear();
+
+    // Сканируем директорию и добавляем файлы
+    QFileInfoList files = scanDirectory();
+    addFilesToTable(files);
+
+    // Обновляем кнопки (если есть файлы – разрешаем Старт, если не идёт обработка)
+    updateButtonsState(m_isProcessing, m_isPaused);
+}
+
 QFileInfoList MainWindow::scanDirectory()
 {
     QDir dir(m_inputPathEdit->text());
@@ -173,10 +187,10 @@ QFileInfoList MainWindow::scanDirectory()
 
 void MainWindow::addFilesToTable(const QFileInfoList &files)
 {
-    QStringList existing = m_pendingFiles;
     for (const QFileInfo &fi : files) {
         QString absPath = fi.absoluteFilePath();
-        if (!existing.contains(absPath)) {
+        // Избегаем дубликатов (хотя после очистки их не будет)
+        if (!m_pendingFiles.contains(absPath)) {
             m_pendingFiles << absPath;
             int row = m_filesTable->rowCount();
             m_filesTable->insertRow(row);
@@ -188,26 +202,74 @@ void MainWindow::addFilesToTable(const QFileInfoList &files)
     }
 }
 
+void MainWindow::onStart()
+{
+    if (m_timerCheck->isChecked()) {
+        // Работа по таймеру: запуск/остановка опроса
+        if (!m_pollingActive) {
+            // Запускаем опрос
+            m_pollTimer.start(m_periodSpin->value() * 1000);
+            m_pollingActive = true;
+            m_startBtn->setText("Остановить опрос");
+            // Если сейчас нет обработки и есть файлы, можно сразу начать обработку
+            if (!m_isProcessing && !m_pendingFiles.isEmpty()) {
+                startProcessingFiles();
+            }
+        } else {
+            // Останавливаем опрос
+            m_pollTimer.stop();
+            m_pollingActive = false;
+            m_startBtn->setText("Старт");
+        }
+    } else {
+        // Разовый запуск обработки найденных файлов
+        if (m_pendingFiles.isEmpty()) {
+            QMessageBox::information(this, "Информация", "Нет файлов для обработки. Сначала выполните поиск.");
+            return;
+        }
+        startProcessingFiles();
+    }
+}
+
+void MainWindow::onPause()
+{
+    m_processor->pauseProcessing();
+    updateButtonsState(true, true);
+}
+
+void MainWindow::onResume()
+{
+    m_processor->resumeProcessing();
+    updateButtonsState(true, false);
+}
+
+void MainWindow::onTimerTick()
+{
+    // Автоматический поиск и запуск обработки при активном таймере
+    QFileInfoList files = scanDirectory();
+    addFilesToTable(files);
+    if (!m_isProcessing && !m_pendingFiles.isEmpty()) {
+        startProcessingFiles();
+    }
+}
+
 void MainWindow::startProcessingFiles()
 {
     if (m_pendingFiles.isEmpty()) {
-        if (!m_timerCheck->isChecked()) {
-            QMessageBox::information(this, "Информация", "Нет файлов для обработки.");
-            updateButtonsState(false, false);
-        }
+        updateButtonsState(false, false);
         return;
     }
 
     QString hexStr = m_hexValueEdit->text().trimmed();
     if (hexStr.size() != 16) {
         QMessageBox::warning(this, "Ошибка", "Введите ровно 16 шестнадцатеричных цифр (8 байт).");
-        updateButtonsState(false, false);
+        updateButtonsState(m_isProcessing, m_isPaused);
         return;
     }
     QByteArray xorKey = QByteArray::fromHex(hexStr.toLatin1());
     if (xorKey.size() != 8) {
         QMessageBox::warning(this, "Ошибка", "Некорректный hex-код.");
-        updateButtonsState(false, false);
+        updateButtonsState(m_isProcessing, m_isPaused);
         return;
     }
 
@@ -219,7 +281,7 @@ void MainWindow::startProcessingFiles()
     QDir().mkpath(outputDir);
 
     QStringList filesToProcess = m_pendingFiles;
-    m_pendingFiles.clear();
+    m_pendingFiles.clear();   // очищаем очередь, чтобы избежать повторов
 
     m_isProcessing = true;
     m_currentFileIndex = -1;
@@ -233,54 +295,6 @@ void MainWindow::startProcessingFiles()
                               Q_ARG(QString, outputDir),
                               Q_ARG(bool, overwrite),
                               Q_ARG(bool, addCounter));
-}
-
-void MainWindow::onStart()
-{
-    if (m_timerCheck->isChecked()) {
-        m_pollTimer.start(m_periodSpin->value() * 1000);
-        onTimerTick();
-    } else {
-        QFileInfoList files = scanDirectory();
-        addFilesToTable(files);
-        startProcessingFiles();
-    }
-}
-
-void MainWindow::onTimerTick()
-{
-    QFileInfoList files = scanDirectory();
-    addFilesToTable(files);
-    if (!m_isProcessing && !m_pendingFiles.isEmpty()) {
-        startProcessingFiles();
-    }
-}
-
-void MainWindow::onPause()
-{
-    QMetaObject::invokeMethod(m_processor, "pauseProcessing", Qt::QueuedConnection);
-    updateButtonsState(true, true);
-}
-
-void MainWindow::onResume()
-{
-    QMetaObject::invokeMethod(m_processor, "resumeProcessing", Qt::QueuedConnection);
-    updateButtonsState(true, false);
-}
-
-void MainWindow::onStop()
-{
-    if (m_pollTimer.isActive())
-        m_pollTimer.stop();
-
-    QMetaObject::invokeMethod(m_processor, "stopProcessing", Qt::QueuedConnection);
-}
-
-void MainWindow::stopWorker()
-{
-    if (m_isProcessing) {
-        QMetaObject::invokeMethod(m_processor, "stopProcessing", Qt::BlockingQueuedConnection);
-    }
 }
 
 void MainWindow::onFileProgress(int fileIndex, qint64 processed, qint64 total)
@@ -310,9 +324,11 @@ void MainWindow::onAllFinished()
     updateButtonsState(false, false);
     m_totalProgressBar->setValue(0);
 
-    if (m_timerCheck->isChecked() && !m_pendingFiles.isEmpty()) {
+    // Если опрос активен и ещё есть файлы, запускаем следующую партию
+    if (m_pollingActive && !m_pendingFiles.isEmpty()) {
         startProcessingFiles();
     }
+    // Если таймер не активен, просто оставляем таблицу очищенной (файлы уже обработаны)
 }
 
 void MainWindow::onProcessingPaused()
@@ -333,14 +349,33 @@ void MainWindow::onProcessingResumed()
 
 void MainWindow::updateButtonsState(bool running, bool paused)
 {
-    m_startBtn->setEnabled(!running);
+    bool polling = m_pollingActive;
+
+    // Кнопка «Старт»: если активен опрос, она всегда доступна для остановки опроса;
+    // иначе доступна, только если не идёт обработка.
+    m_startBtn->setEnabled(polling || !running);
+
     m_pauseBtn->setEnabled(running && !paused);
     m_resumeBtn->setEnabled(running && paused);
-    m_stopBtn->setEnabled(running);
+
+    // Кнопка «Поиск» активна всегда
+    m_searchBtn->setEnabled(true);
+}
+
+void MainWindow::stopWorker()
+{
+    if (m_isProcessing) {
+        m_processor->stopProcessing();
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    // Останавливаем таймер, если активен
+    if (m_pollingActive) {
+        m_pollTimer.stop();
+        m_pollingActive = false;
+    }
     stopWorker();
     m_workerThread.quit();
     m_workerThread.wait();

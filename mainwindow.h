@@ -27,13 +27,16 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private slots:
     void onBrowseInputPath();
     void onBrowseOutputPath();
+    void onSearch();          // <-- новый слот
     void onStart();
     void onPause();
     void onResume();
-    void onStop();
     void onTimerTick();
 
     void onFileProgress(int fileIndex, qint64 processed, qint64 total);
@@ -41,9 +44,6 @@ private slots:
     void onAllFinished();
     void onProcessingPaused();
     void onProcessingResumed();
-
-protected:
-    void closeEvent(QCloseEvent *event) override;
 
 private:
     void setupUi();
@@ -53,7 +53,7 @@ private:
     void startProcessingFiles();
     void stopWorker();
 
-    // UI элементы
+    // UI
     QLineEdit *m_maskEdit;
     QCheckBox *m_deleteInputCheck;
     QLineEdit *m_outputPathEdit;
@@ -66,7 +66,7 @@ private:
     QPushButton *m_startBtn;
     QPushButton *m_pauseBtn;
     QPushButton *m_resumeBtn;
-    QPushButton *m_stopBtn;
+    QPushButton *m_searchBtn;     // кнопка "Поиск" вместо "Стоп"
 
     QTableWidget *m_filesTable;
     QProgressBar *m_totalProgressBar;
@@ -79,6 +79,7 @@ private:
 
     bool m_isProcessing = false;
     bool m_isPaused = false;
+    bool m_pollingActive = false;   // флаг активности таймера опроса
     int m_currentFileIndex = -1;
 };
 

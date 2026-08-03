@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QCoreApplication>
 
 FileProcessor::FileProcessor(QObject *parent) : QObject(parent) {}
 
